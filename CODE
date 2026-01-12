@@ -1,0 +1,870 @@
+---
+title: "EXAM-M1-APE"
+author: "ARNOULT Matteo, TAHIRI Liridoni, BISHINGA Joe Junior M1-SE"
+date: "2025-12-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE)
+
+# Installer reticulate si pas déjà fait
+install.packages("reticulate", repos = "http://cran.us.r-project.org")
+install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+install.packages("dplyr", repos = "http://cran.us.r-project.org")
+
+# Charger reticulate
+library(reticulate)
+
+# Installer pandas dans l'environnement Python
+py_install("pandas")
+```
+
+
+### Partie 1 : Analyse des messages 
+
+
+```{python}
+import os
+import json
+import hashlib
+import pandas as pd
+
+
+# 1. NETTOYAGE ENCODAGE
+def decoder_instagram(obj):
+    """
+    Decode les objets (str, list, dict) pour corriger l'encodage.
+    """
+    if isinstance(obj, str):
+        try:
+            return obj.encode('latin-1').decode('utf-8')
+        except:
+            return obj
+    elif isinstance(obj, list):
+        return [decoder_instagram(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: decoder_instagram(v) for k, v in obj.items()}
+    return obj
+
+
+# 2. EXTRACTION 
+def extraire_donnees_depuis_dossier(chemin_racine):
+    """
+    Parcourt le dossier racine pour extraire les messages Instagram.
+    """
+    tous_les_messages = []
+
+    # Stratégie pour trouver le dossier inbox
+    chemin_inbox = os.path.join(
+        chemin_racine, 'your_instagram_activity', 'messages', 'inbox')
+
+    # Si le chemin standard échoue, on cherche "inbox" partout
+    if not os.path.exists(chemin_inbox):
+        for root, dirs, files in os.walk(chemin_racine):
+            if 'inbox' in dirs and 'messages' in root:
+                chemin_inbox = os.path.join(root, 'inbox')
+                break
+
+    if not os.path.exists(chemin_inbox):
+        return pd.DataFrame()
+
+    # Lecture des fichiers
+    for dossier_conv in os.listdir(chemin_inbox):
+        chemin_conv = os.path.join(chemin_inbox, dossier_conv)
+        if os.path.isdir(chemin_conv):
+            for fichier in os.listdir(chemin_conv):
+                if (fichier.endswith('.json') and
+                        fichier.startswith('message_')):
+                    chemin_fichier = os.path.join(chemin_conv, fichier)
+                    with open(chemin_fichier, 'r', encoding='utf-8') as f:
+                        try:
+                            data = decoder_instagram(json.load(f))
+                        except:
+                            continue
+
+                        nom_conv = data.get('title', 'Inconnu')
+
+                        for msg in data.get('messages', []):
+                            msg_type = "texte"
+                            # On utilise le contenu pour différencier
+                            contenu_hash = ""
+
+                            if 'content' in msg:
+                                msg_type = "texte"
+                                contenu_hash = msg['content']
+                            elif 'photos' in msg:
+                                msg_type = "photo"
+                                contenu_hash = msg['photos'][0]['uri']
+                            elif 'videos' in msg:
+                                msg_type = "video"
+                                contenu_hash = msg['videos'][0]['uri']
+                            elif 'audio_files' in msg:
+                                msg_type = "audio"
+                                contenu_hash = msg['audio_files'][0]['uri']
+
+                            # ID UNIQUE : Date + Expéditeur + Type + Contenu
+                            ts = int(msg.get('timestamp_ms', 0))
+                            sender = msg.get('sender_name')
+                            empreinte = (f"{ts}{sender}"
+                                         f"{msg_type}{contenu_hash}")
+                            id_unique = hashlib.md5(
+                                empreinte.encode()).hexdigest()
+
+                            tous_les_messages.append({
+                                'id': id_unique,
+                                'date': pd.to_datetime(ts, unit='ms'),
+                                'conversation': nom_conv,
+                                'expediteur': msg.get('sender_name'),
+                                'type': msg_type,
+                            })
+
+    return pd.DataFrame(tous_les_messages)
+
+# 3. MISE A JOUR INTELLIGENTE
+def mise_a_jour_base_unique(nouveau_df_global,
+                            fichier_db="ma_base_messages.csv"):
+    """
+    Fusionne les nouvelles données avec la base existante (CSV)
+    et supprime les doublons basés sur l'identifiant unique.
+    """
+    df_final = nouveau_df_global
+
+    # Chargement de l'ancienne base si elle existe
+    if os.path.exists(fichier_db):
+        try:
+            old_df = pd.read_csv(fichier_db, dtype={'id': str})
+            df_final = pd.concat([old_df, nouveau_df_global])
+        except Exception as e:
+            print(f"Création d'une nouvelle base (Erreur lecture : {e})")
+
+    # DÉDOUBLONNAGE
+    nb_total = len(df_final)
+    # C'est ici qu'on supprime les doublons (même ID)
+    df_final = df_final.drop_duplicates(subset=['id'], keep='first')
+    nb_unique = len(df_final)
+
+    df_final.to_csv(fichier_db, index=False)
+    print(f"Base sauvegardée : {nb_unique} messages uniques "
+          f"(dont {nb_total - nb_unique} doublons nettoyés).")
+    return df_final
+
+
+# 4. EXECUTION AUTOMATIQUE 
+# Trouve tous les dossiers "instagram-..."
+dossiers = [
+    d for d in os.listdir('.')
+    if os.path.isdir(d) and d.startswith('instagram-')
+]
+print(f"Dossiers trouvés : {dossiers}")
+
+liste_dfs = []
+for d in dossiers:
+    print(f"Lecture de {d}...")
+    df = extraire_donnees_depuis_dossier(d)
+    if not df.empty:
+        liste_dfs.append(df)
+
+if liste_dfs:
+    grand_df = pd.concat(liste_dfs)
+    df_final = mise_a_jour_base_unique(grand_df)
+    print(df_final.head())
+else:
+    print("Aucune donnée trouvée.")
+```
+
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 5. CHARGEMENT ET PRÉPARATION DES DONNÉES 
+"""
+Chargement initial du dataset et conversion des dates pour l'analyse.
+"""
+df = pd.read_csv("ma_base_messages.csv")
+df["date"] = pd.to_datetime(df["date"])
+
+# 6. ANALYSE GLOBALE PAR HEURE 
+# Trouver l'expéditeur qui a envoyé le plus de messages
+expediteur_top = df["expediteur"].value_counts().idxmax()
+print(f"Expéditeur avec le plus de messages : {expediteur_top}")
+
+# Filtrer les messages de cet expéditeur
+df_top = df[df["expediteur"] == expediteur_top].copy()
+
+# Extraire l'heure
+df_top["heure"] = df_top["date"].dt.hour
+
+# Compter le nombre de messages par heure
+messages_par_heure = df_top.groupby("heure").size()
+messages_par_heure = messages_par_heure.reindex(range(24), fill_value=0)
+
+# Tracer le graphique global
+plt.figure(figsize=(10, 5))
+plt.bar(messages_par_heure.index, messages_par_heure.values)
+plt.xlabel("Heure de la journée")
+plt.ylabel("Nombre de messages envoyés")
+plt.title(f"Messages envoyés par heure - {expediteur_top}")
+plt.xticks(range(24))
+plt.grid(axis="y", linestyle="--", alpha=0.7)
+plt.show()
+
+# 7. ANALYSE PAR ANNÉE (HEURES ET RÉPARTITION) 
+df_top["annee"] = df_top["date"].dt.year
+
+# Boucle sur chaque année
+for annee, df_annee in df_top.groupby("annee"):
+    # Compter le nombre de messages par heure pour cette année
+    messages_par_heure = df_annee.groupby("heure").size()
+    messages_par_heure = messages_par_heure.reindex(range(24), fill_value=0)
+
+    # Tracer le graphique annuel
+    plt.figure(figsize=(10, 5))
+    plt.bar(messages_par_heure.index,
+            messages_par_heure.values,
+            color="green")
+    plt.xlabel("Heure de la journée")
+    plt.ylabel("Nombre de messages envoyés")
+    plt.title(f"Messages envoyés par heure - {expediteur_top} ({annee})")
+    plt.xticks(range(24))
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    plt.show()
+
+# Nombre total de messages envoyés par année (Diagramme circulaire)
+messages_par_annee = df_top.groupby("annee").size()
+
+plt.figure(figsize=(8, 8))
+plt.pie(
+    messages_par_annee.values,
+    labels=messages_par_annee.index,
+    autopct=lambda p: f"{int(p / 100 * messages_par_annee.sum())}",
+    startangle=90,
+    colors=plt.cm.tab20.colors
+)
+plt.title(f"Répartition des messages par année - {expediteur_top}")
+plt.show()
+
+# 8. MOYENNE QUOTIDIENNE PAR HEURE 
+df_top["jour"] = df_top["date"].dt.date
+
+# Nombre de messages par jour et par heure
+messages_jour_heure = (
+    df_top.groupby(["jour", "heure"])
+          .size()
+          .reset_index(name="nb_messages")
+)
+
+# Moyenne quotidienne par heure
+moyenne_par_heure = (
+    messages_jour_heure.groupby("heure")["nb_messages"]
+                        .mean()
+                        .reindex(range(24), fill_value=0)
+)
+
+# Tracer le graphique de moyenne
+plt.figure(figsize=(10, 5))
+plt.bar(moyenne_par_heure.index, moyenne_par_heure.values, color="purple")
+plt.xlabel("Heure de la journée")
+plt.ylabel("Moyenne de messages par jour")
+plt.title(f"Moyenne quotidienne de messages par heure - {expediteur_top}")
+plt.xticks(range(24))
+plt.grid(axis="y", linestyle="--", alpha=0.7)
+plt.show()
+
+# 9. ANALYSE DES DESTINATAIRES (TOP 5 PAR ANNÉE)
+# Extraire l'année pour le contexte global du dataframe
+df["annee"] = df["date"].dt.year
+
+# Identifier l'expéditeur principal globalement
+expediteur_principal = df["expediteur"].value_counts().idxmax()
+print(f"Expéditeur principal global : {expediteur_principal}\n")
+
+# Filtrer les messages envoyés par l'expéditeur principal
+df_expediteur = df[df["expediteur"] == expediteur_principal]
+
+# Compter les messages par destinataire (conversation) par année
+comptes = (
+    df_expediteur.groupby(["annee", "conversation"])
+                 .size()
+                 .reset_index(name="nb_messages")
+)
+
+# Boucle sur chaque année pour créer un tableau séparé
+for annee, df_annee in comptes.groupby("annee"):
+    top_5 = (
+        df_annee.sort_values("nb_messages", ascending=False)
+                .head(5)
+                .reset_index(drop=True)
+    )
+
+    print(f"Top 5 des destinataires en {annee} :")
+    print(top_5)
+    print("-" * 40)
+```
+
+
+### Partie 2 : Analyse de l'algorythme
+
+
+```{python}
+import os
+import json
+import pandas as pd
+
+
+# 1. EXTRACTION CIBLEE 
+def extraire_topics_recommandes(chemin_racine):
+    """
+    Recherche et extrait la liste des centres d'intérêt (topics)
+    depuis les fichiers JSON exportés.
+    """
+    topics = []
+    chemin_topics = None
+
+    # Recherche du fichier
+    for root, dirs, files in os.walk(chemin_racine):
+        if 'recommended_topics.json' in files:
+            chemin_topics = os.path.join(root, 'recommended_topics.json')
+            break
+        elif 'your_topics.json' in files:
+            chemin_topics = os.path.join(root, 'your_topics.json')
+            break
+
+    if chemin_topics and os.path.exists(chemin_topics):
+        print(f"Fichier trouve : {chemin_topics}")
+        with open(chemin_topics, 'r', encoding='utf-8') as f:
+            try:
+                # On utilise json.load
+                raw_data = json.load(f)
+
+                # Récupération de la liste brute
+                # La clé est 'topics_your_topics'
+                liste_brute = raw_data.get('topics_your_topics', [])
+
+                # Si vide, on tente les anciennes clés au cas où
+                if not liste_brute:
+                    liste_brute = raw_data.get('your_topics',
+                                               raw_data.get('topics', []))
+
+                # Extraction précise
+                for item in liste_brute:
+                    try:
+                        # string_map_data -> Nom -> value
+                        if ('string_map_data' in item and
+                                'Nom' in item['string_map_data']):
+                            valeur = item['string_map_data']['Nom']['value']
+                            topics.append(valeur)
+                        # Au cas où Instagram changerait 'Nom' en 'Name'
+                        elif ('string_map_data' in item and
+                              'Name' in item['string_map_data']):
+                            valeur = item['string_map_data']['Name']['value']
+                            topics.append(valeur)
+                        # Cas simple (ancien format)
+                        elif 'value' in item:
+                            topics.append(item['value'])
+                    except:
+                        continue  # On ignore les erreurs individuelles
+
+            except Exception as e:
+                print(f"Erreur globale lecture JSON : {e}")
+
+    print(f"{len(topics)} topics extraits avec succes.")
+    return topics
+
+
+# 2. MISE A JOUR 
+def mise_a_jour_historique_algo(liste_actuelle,
+                                fichier_db="base_algorithme.csv"):
+    """
+    Compare les topics actuels avec l'historique CSV pour identifier
+    le noyau dur, les nouveautés et les disparitions.
+    """
+    date_aujourdhui = pd.Timestamp.now().strftime('%Y-%m-%d')
+    topics_actuels = set(liste_actuelle)
+
+    if os.path.exists(fichier_db):
+        df_hist = pd.read_csv(fichier_db)
+        topics_precedents = set(df_hist['topic'].tolist())
+        premier_scan = False
+    else:
+        cols = ['topic', 'premiere_apparition', 'derniere_presence', 'statut']
+        df_hist = pd.DataFrame(columns=cols)
+        topics_precedents = set()
+        premier_scan = True
+
+    noyau_dur = topics_actuels.intersection(topics_precedents)
+    nouveautes = topics_actuels - topics_precedents
+    disparus = topics_precedents - topics_actuels
+
+    lignes_a_ajouter = []
+
+    # Mise à jour existants
+    mask_actuels = df_hist['topic'].isin(topics_actuels)
+    df_hist.loc[mask_actuels, 'derniere_presence'] = date_aujourdhui
+
+    mask_noyau = df_hist['topic'].isin(noyau_dur)
+    df_hist.loc[mask_noyau, 'statut'] = "Noyau Dur"
+
+    # Gestion des nouveautés (vraies ou retours)
+    for t in nouveautes:
+        if t not in df_hist['topic'].values:
+            lignes_a_ajouter.append({
+                'topic': t,
+                'premiere_apparition': date_aujourdhui,
+                'derniere_presence': date_aujourdhui,
+                'statut': "Nouveau"
+            })
+        else:
+            df_hist.loc[df_hist['topic'] == t, 'statut'] = "Nouveau"
+
+    if lignes_a_ajouter:
+        df_hist = pd.concat([df_hist, pd.DataFrame(lignes_a_ajouter)],
+                            ignore_index=True)
+
+    df_hist.loc[df_hist['topic'].isin(disparus), 'statut'] = "Disparu"
+    df_hist.to_csv(fichier_db, index=False)
+
+    print("\n" + "=" * 40)
+    print("AUDIT DE STABILITE ALGORITHMIQUE")
+    print("=" * 40)
+    if premier_scan:
+        print(f"Premier scan : {len(topics_actuels)} themes enregistres.")
+    else:
+        print(f"NOYAU DUR : {len(noyau_dur)}")
+        print(f"NOUVEAUTES : {len(nouveautes)}")
+        print(f"DISPARUS : {len(disparus)}")
+
+    return df_hist
+```
+
+
+```{python}
+import os
+
+# 3. AUDIT SUR LES THÈMES DE L'ALGORYTHME
+tous_les_elements = os.listdir('.')
+dossiers_exports = [
+    d for d in tous_les_elements
+    if os.path.isdir(d) and d.startswith('instagram-')
+]
+
+if dossiers_exports:
+    dossier = dossiers_exports[0]
+    print(f"Dossier : {dossier}")
+
+    # Extraction
+    mes_topics = extraire_topics_recommandes(dossier)
+
+    # Audit
+    if mes_topics:
+        df_final = mise_a_jour_historique_algo(mes_topics)
+    else:
+        print("Toujours 0 topic. Verifiez l'encodage du fichier JSON.")
+else:
+    print("Aucun dossier trouve.")
+```
+
+
+```{python}
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# 4. CHARGER LES DONNÉES GÉNÉRÉES PAR L'AUDIT
+try:
+    df = pd.read_csv("base_algorithme.csv")
+
+    # On garde uniquement les sujets actifs (pas ceux qui ont disparu)
+    df_actifs = df[df['statut'] != "Disparu"]
+
+    # Préparer les données pour le graphique
+    comptes = df_actifs['statut'].value_counts()
+
+    # Couleurs : Or pour le stable, Vert pour le nouveau
+    couleurs = {'Noyau Dur': '#FFD700', 'Nouveau': '#32CD32'}
+    couleurs_barres = [couleurs.get(x, 'blue') for x in comptes.index]
+
+    # Affichage
+    plt.figure(figsize=(8, 6))
+    bars = plt.bar(comptes.index, comptes.values,
+                   color=couleurs_barres, edgecolor='black')
+
+    plt.title(f"Stabilite de mon Profil "
+              f"({len(df_actifs)} themes identifies)", fontsize=14)
+    plt.ylabel("Nombre de themes", fontsize=12)
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+    # Ajouter les chiffres sur les barres
+    for bar in bars:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width() / 2., height,
+                 f'{int(height)}', ha='center', va='bottom',
+                 fontsize=12, fontweight='bold')
+
+    plt.show()
+
+except Exception as e:
+    print(f"Pas encore de donnees a afficher. ({e})")
+```
+
+
+```{python}
+import pandas as pd
+
+# 5. TRI DES DONNÉES DE L'AUDIT
+try:
+    df = pd.read_csv("base_algorithme.csv")
+
+    # Séparation et tri alphabétique des trois catégories
+    # On force en string (.astype(str)) pour éviter les bugs
+    # si un sujet est un nombre.
+    noyau = sorted(
+        df[df['statut'] == 'Noyau Dur']['topic']
+        .astype(str).tolist()
+    )
+    nouveaux = sorted(
+        df[df['statut'] == 'Nouveau']['topic']
+        .astype(str).tolist()
+    )
+    disparus = sorted(
+        df[df['statut'] == 'Disparu']['topic']
+        .astype(str).tolist()
+    )
+
+    total_actifs = len(noyau) + len(nouveaux)
+
+    # Affichage du rapport détaillé
+    print("\n" + "=" * 60)
+    print("RAPPORT DETAILLE DE L'IDENTITE ALGORITHMIQUE")
+    print(f"   (Total sujets actifs : {total_actifs})")
+    print("=" * 60)
+
+    # A : LE NOYAU DUR
+    if noyau:
+        print(f"\nNOYAU DUR ({len(noyau)})")
+        print("   Ces sujets sont stables et definissent votre profil.")
+        print("   " + "-" * 50)
+        for t in noyau:
+            print(f"   - {t}")
+    else:
+        print("\nNOYAU DUR : Aucun sujet stable detecte pour l'instant.")
+
+    # B : LES NOUVEAUTES
+    if nouveaux:
+        print(f"\nNOUVEAUTES ({len(nouveaux)})")
+        print("   Sujets ajoutes recemment par l'algorithme.")
+        print("   " + "-" * 50)
+        for t in nouveaux:
+            print(f"   + {t}")
+    elif not noyau:
+        # Si on a ni noyau ni nouveau, c'est etrange (ou premier scan vide)
+        pass
+    else:
+        print("\nNOUVEAUTES : Aucune nouveaute detectee.")
+
+    # C : LES DISPARITIONS 
+    # Cette section ne s'affichera que si vous avez fait
+    # plusieurs exports differents.
+    if disparus:
+        print(f"\nDISPARITIONS ({len(disparus)})")
+        print("   Sujets que l'algorithme a abandonnes.")
+        print("   " + "-" * 50)
+        for t in disparus:
+            print(f"   ~ {t}")
+
+    print("\n" + "=" * 60)
+
+except FileNotFoundError:
+    print("Fichier 'base_algorithme.csv' introuvable. "
+          "Lancez d'abord le bloc d'audit ci-dessus.")
+except Exception as e:
+    print(f"Une erreur est survenue lors de l'affichage : {e}")
+```
+
+
+### Partie 3 : Analyse de l'activité
+
+
+```{python}
+import os
+import json
+import hashlib
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# 1. RECHERCHE DES FICHIERS D'ACTIVITÉ
+def trouver_fichiers_activite(chemin_racine):
+    """
+    Parcourt le dossier racine pour trouver les fichiers JSON
+    correspondant aux activités ciblées (Likes, Stories, etc.).
+    """
+    # Mapping : Nom du fichier -> Type d'activité (Label)
+    cibles = {
+        "liked_posts.json": "Like",
+        "liked_comments.json": "Like",
+        "stories.json": "Story",
+        "reels_comments.json": "Reel",
+        "threads_viewed.json": "Thread"
+    }
+
+    resultats = []
+
+    for racine, dossiers, fichiers in os.walk(chemin_racine):
+        for f in fichiers:
+            if f in cibles:
+                resultats.append({
+                    "chemin": os.path.join(racine, f),
+                    "activite": cibles[f],
+                    "fichier": f
+                })
+    return resultats
+
+
+# 2. EXTRACTION DES TIMESTAMPS
+def extraire_horodatages(objet):
+    """
+    Générateur récursif pour extraire les timestamps
+    d'une structure JSON imbriquée (dictionnaire ou liste).
+    """
+    if isinstance(objet, dict):
+        for cle, valeur in objet.items():
+            # On cherche les clés spécifiques utilisées par Instagram
+            if (cle in ["timestamp_ms", "timestamp"] and
+                    isinstance(valeur, (int, float))):
+                yield valeur
+            else:
+                yield from extraire_horodatages(valeur)
+    elif isinstance(objet, list):
+        for element in objet:
+            yield from extraire_horodatages(element)
+
+
+def convertir_horodatage(ts):
+    """
+    Convertit un timestamp brut (secondes ou millisecondes) en objet datetime.
+    Gère les erreurs et les valeurs invalides.
+    """
+    try:
+        ts = float(ts)
+        if ts <= 0:
+            return pd.NaT
+        # Si > 1e11, on suppose que ce sont des millisecondes
+        unite = "ms" if ts > 1e11 else "s"
+        return pd.to_datetime(ts, unit=unite, errors="coerce")
+    except:
+        return pd.NaT
+
+
+# 3. ANALYSE D'UN DOSSIER EXPORT INSTAGRAM
+def analyser_dossier_instagram(chemin_racine):
+    """
+    Analyse un dossier d'export Instagram complet, extrait les
+    activités et retourne un DataFrame nettoyé.
+    """
+    enregistrements = []
+    fichiers_trouves = trouver_fichiers_activite(chemin_racine)
+
+    for info in fichiers_trouves:
+        with open(info["chemin"], "r", encoding="utf-8") as f:
+            try:
+                donnees = json.load(f)
+                for horodatage in extraire_horodatages(donnees):
+                    enregistrements.append({
+                        "ts_brut": horodatage,
+                        "activite": info["activite"],
+                        "fichier_source": info["fichier"],
+                        "dossier_source": os.path.basename(chemin_racine)
+                    })
+            except:
+                continue
+
+    if not enregistrements:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(enregistrements)
+    
+    # Conversion et nettoyage des dates
+    df["date_heure"] = df["ts_brut"].apply(convertir_horodatage)
+    df = df.dropna(subset=["date_heure"])
+    df = df[df["date_heure"].dt.year > 1970]
+    df["annee"] = df["date_heure"].dt.year
+
+    # Empreinte unique
+    # Création d'un ID unique pour éviter les doublons lors des fusions
+    df["id_evenement"] = df.apply(
+        lambda r: hashlib.sha256(
+            f"{r['ts_brut']}_{r['activite']}_{r['fichier_source']}"
+            .encode()
+        ).hexdigest(),
+        axis=1
+    )
+
+    return df
+
+
+# 4. EXPORT CSV TRANSPARENT 
+def exporter_csv_transparence(df, nom_fichier="instagram_activity_trace.csv"):
+    """
+    Exporte les données dans un CSV global
+    (ajoute les nouvelles données sans dupliquer).
+    """
+    if os.path.exists(nom_fichier):
+        ancien_df = pd.read_csv(nom_fichier, parse_dates=["date_heure"])
+        df = pd.concat([ancien_df, df], ignore_index=True)
+        df = df.drop_duplicates(subset="id_evenement")
+
+    df.sort_values("date_heure").to_csv(nom_fichier, index=False)
+    print(f"CSV mis à jour : {nom_fichier}")
+    print("Sauvegardé dans :", os.getcwd())
+
+
+# 5. VISUALISATION
+def visualiser_activite_depuis_dossier(dossier_tables="tables_par_annee"):
+    """
+    Génère des camemberts pour chaque année
+    à partir des fichiers CSV générés.
+    """
+    if not os.path.exists(dossier_tables):
+        print(f"Dossier introuvable : {dossier_tables}")
+        return
+
+    fichiers_csv = sorted(
+        f for f in os.listdir(dossier_tables)
+        if f.endswith(".csv")
+    )
+
+    if not fichiers_csv:
+        print("Aucun fichier CSV annuel trouvé.")
+        return
+
+    plt.style.use("ggplot")
+
+    for fichier in fichiers_csv:
+        chemin = os.path.join(dossier_tables, fichier)
+        df = pd.read_csv(chemin)
+
+        if "activite" not in df.columns:
+            print(f"Ignoré {fichier}: colonne 'activite' manquante")
+            continue
+
+        # Extraire l'année du nom de fichier (instagram_activity_YYYY.csv)
+        annee_str = fichier.split("_")[-1].replace(".csv", "")
+
+        comptes_activite = df["activite"].value_counts()
+
+        plt.figure(figsize=(8, 6))
+        comptes_activite.plot(
+            kind="pie",
+            autopct="%1.1f%%",
+            startangle=140,
+            colormap="Set3",
+            explode=[0.05] * len(comptes_activite)
+        )
+
+        plt.title(f"Répartition de l'activité - {annee_str}")
+        plt.ylabel("")
+        plt.tight_layout()
+        plt.show()
+
+
+# 6. UNE TABLE (CSV) PAR ANNÉE
+def creer_tables_par_annee_depuis_csv(
+    fichier_csv="instagram_activity_trace.csv",
+    dossier_sortie="tables_par_annee"
+):
+    """
+    Découpe le fichier CSV global en plusieurs petits fichiers
+    CSV par année.
+    """
+    if not os.path.exists(fichier_csv):
+        print(f"CSV introuvable : {fichier_csv}")
+        return
+
+    df = pd.read_csv(fichier_csv, parse_dates=["date_heure"])
+    os.makedirs(dossier_sortie, exist_ok=True)
+
+    # On s'assure que les années sont bien traitées
+    annees_uniques = sorted(df["annee"].dropna().unique())
+
+    for annee in annees_uniques:
+        df_annee = df[df["annee"] == annee].sort_values("date_heure")
+        fichier_sortie = os.path.join(
+            dossier_sortie,
+            f"instagram_activity_{int(annee)}.csv"
+        )
+        df_annee.to_csv(fichier_sortie, index=False)
+        print(f"Table annuelle créée : {fichier_sortie}")
+
+
+# 7. TABLEAU RÉCAPITULATIF MARKDOWN
+def afficher_table_markdown(df):
+    """
+    Affiche un tableau récapitulatif formaté en Markdown
+    dans la console.
+    """
+    comptes_annuels = (
+        df.groupby(["annee", "activite"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    comptes_annuels["Total"] = comptes_annuels.sum(axis=1)
+
+    print("\n===== TABLEAU D'ACTIVITÉ ANNUELLE =====\n")
+
+    en_tetes = ["Année"] + list(comptes_annuels.columns)
+    print("| " + " | ".join(en_tetes) + " |")
+    print("|" + "|".join(["---"] * len(en_tetes)) + "|")
+
+    for annee, ligne in comptes_annuels.iterrows():
+        valeurs = [str(int(annee))] + [str(int(v)) for v in ligne]
+        print("| " + " | ".join(valeurs) + " |")
+
+
+# 8. EXÉCUTION
+print("Répertoire de travail :", os.getcwd())
+
+# Recherche des dossiers commençant par "instagram-"
+dossiers = [
+    d for d in os.listdir(".")
+    if os.path.isdir(d) and d.startswith("instagram-")
+]
+
+print(f"Dossiers Instagram trouvés : {dossiers}")
+
+liste_dfs = []
+
+for d in dossiers:
+    print(f"Traitement de {d}...")
+    df_temp = analyser_dossier_instagram(d)
+    if not df_temp.empty:
+        liste_dfs.append(df_temp)
+
+if liste_dfs:
+    df_global = pd.concat(liste_dfs, ignore_index=True)
+
+    # Déduplication finale
+    df_global = df_global.drop_duplicates(subset="id_evenement")
+    df_global = df_global.sort_values("date_heure")
+
+    print("\nAperçu des données utilisées :")
+    print(df_global.head())
+
+    # Sauvegarde du fichier global
+    exporter_csv_transparence(df_global)
+
+    # Affichage du tableau récapitulatif
+    afficher_table_markdown(df_global)
+
+    # Création des fichiers par année
+    creer_tables_par_annee_depuis_csv()
+
+    # Visualisation
+    visualiser_activite_depuis_dossier()
+
+else:
+    print("Aucune donnée trouvée.")
+```
+
